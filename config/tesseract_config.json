@@ -1,3 +1,4 @@
 {
-  "tesseract_cmd": "C:/Program Files/Tesseract-OCR/tesseract.exe"
+  "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+  "lang": "rus+eng"
 }

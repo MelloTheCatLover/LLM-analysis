@@ -1,160 +1,135 @@
 import os
 import json
-import fitz                                 
-import pytesseract
-from pdf2image import convert_from_path
 import pandas as pd
-import subprocess
-import difflib
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Настройки из config/
-# ─────────────────────────────────────────────────────────────────────────────
+from ocr_processor import extract_text
+from llm_client import classify_with_llm, analyze_document
+from classifier import compute_similarity, is_match
+from analyze_portfolio import analyze_portfolio
+
+INPUT_DIR = 'data/input'
+OUTPUT_DIR = 'data/output'
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 with open('config/tesseract_config.json', encoding='utf-8') as f:
     t_cfg = json.load(f)
-pytesseract.pytesseract.tesseract_cmd = t_cfg['tesseract_cmd']
 TESSERACT_LANG = t_cfg.get('lang', 'rus+eng')
 
 with open('config/categories.json', encoding='utf-8') as f:
     CATEGORIES = json.load(f)
 
-INPUT_DIR  = 'data/input'
-OUTPUT_DIR = 'data/output'
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+with open('config/user_manifest.json', encoding='utf-8') as f:
+    manifest = json.load(f)
 
-LLM_MODEL = 'mistral'
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  OCR и извлечение текста
-# ─────────────────────────────────────────────────────────────────────────────
-
-def extract_text(filepath: str) -> str:
-    """Пытаемся получить текст напрямую, иначе — через OCR."""
-    try:
-        doc = fitz.open(filepath)
-        txt = ''.join(page.get_text() for page in doc)
-        if txt.strip():
-            print(f"=======Извлечение текста из PDF без OCR: {os.path.basename(filepath)}=======")
-            return txt
-    except Exception as e:
-        print(f"=======Ошибка PyMuPDF: {e}=======")
-
-    print(f"=======Используем OCR для: {os.path.basename(filepath)}=======")
-    images = convert_from_path(filepath, dpi=300)
-    ocr_text = ''
-    for img in images:
-        ocr_text += pytesseract.image_to_string(img, lang=TESSERACT_LANG)
-    txt_path = filepath + '.ocr.txt'
-    with open(txt_path, 'w', encoding='utf-8') as f:
-        f.write(ocr_text)
-    print(f"=======OCR завершён, символов: {len(ocr_text)} (сохранено в {os.path.basename(txt_path)})=======")
-    return ocr_text
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Вызов LLM и парсинг ответа
-# ─────────────────────────────────────────────────────────────────────────────
-
-def classify_with_llm(text: str) -> tuple[str, str]:
-    """Отправляем промпт локальной LLM и возвращаем (category, description)."""
-    prompt = f"""
-Ты — помощник приёмной комиссии. Определи, к какой категории относится текст документа.  
-Ответь строго в формате:
-Категория: <одна из категорий>
-Описание: <одно предложение>
-
-Категории:
-{os.linesep.join(f"- {c}" for c in CATEGORIES)}
-
-Текст документа (первые 2000 символов):
-{text[:2000]}
-""".strip()
-
-    print("=======Отправка запроса в LLM=======")
-    proc = subprocess.run(
-        ['ollama', 'run', LLM_MODEL],
-        input=prompt.encode('utf-8'),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-    output = proc.stdout.decode('utf-8', errors='ignore').strip()
-
-    # Логируем промпт и ответ
-    with open(os.path.join(OUTPUT_DIR, 'llm_raw.log'), 'a', encoding='utf-8') as log:
-        log.write('\n\n=== Новый вызов LLM ===\n')
-        log.write(prompt + '\n\n')
-        log.write(output + '\n')
-        log.write('=======================\n')
-
-    print("\n======= Ответ LLM:\n" + '-'*40 + f"\n{output}\n=======" + '-'*40)
-
-    # Извлекаем категорию и описание надёжно
-    category, description = 'Иное', ''
-    for line in output.splitlines():
-        low = line.lower()
-        if 'категория' in low and ':' in line:
-            parts = line.split(':', 1)
-            category = parts[1].strip()
-        elif 'описание' in low and ':' in line:
-            parts = line.split(':', 1)
-            description = parts[1].strip()
-
-    return category, description
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Сравнение категорий
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_similarity(a: str, b: str) -> float:
-    vec = TfidfVectorizer().fit_transform([a, b])
-    return float(cosine_similarity(vec[0], vec[1])[0][0])
-
-def is_match(detected: str, claimed: str) -> bool:
-    """Возвращает True, если детектированная категория близка к заявленной."""
-    # векторная близость
-    sim = compute_similarity(detected, claimed)
-    if sim >= 0.65:
-        return True
-    # fallback на строковое сравнение
-    return difflib.SequenceMatcher(None, detected.lower(), claimed.lower()).ratio() > 0.7
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Основной пайплайн
-# ─────────────────────────────────────────────────────────────────────────────
+LLM_MODEL = 'mistral'  # или другая модель
 
 def main():
-    # Загружаем манифест пользователя
-    with open('config/user_manifest.json', encoding='utf-8') as f:
-        manifest = json.load(f)
+    detailed_docs = []
 
-    results = []
     for entry in manifest:
-        fname = entry['filename']
-        claimed = entry['claimed_type']
+        fname = entry.get('filename')
+        claimed = entry.get('claimed_type', '').strip()
         path = os.path.join(INPUT_DIR, fname)
-        print(f"\n=== Обработка {fname} ===")
-        text = extract_text(path)
-        detected, desc = classify_with_llm(text)
+
+        if not os.path.isfile(path):
+            print(f"Ошибка: файл не найден: {path}")
+            continue
+
+        print(f"\n=== Обработка файла: {fname} ===")
+        text = extract_text(path, TESSERACT_LANG)
+
+        detected, description = classify_with_llm(text, CATEGORIES, LLM_MODEL, OUTPUT_DIR)
+        sim = compute_similarity(detected, claimed)
         match = is_match(detected, claimed)
-        results.append({
-            'Файл': fname,
-            'Заявлено': claimed,
-            'Определено LLM': detected,
-            'Описание LLM': desc,
-            'Совпадает': '✅' if match else '❌',
-            'Сходство': f"{compute_similarity(detected, claimed):.2f}"
+
+        match_str = "Да" if match else "Нет"
+        print(f"Заявлено: {claimed}")
+        print(f"Определено: {detected}")
+        print(f"Сходство категорий (TF-IDF): {sim:.2f}")
+        print(f"Совпадает с заявленным: {match_str}")
+
+        analysis = analyze_document(text, detected, LLM_MODEL, OUTPUT_DIR)
+        detailed_docs.append({
+            'filename': fname,
+            'claimed': claimed,
+            'detected': detected,
+            'description': description,
+            'similarity': sim,
+            'match': match,
+            'text': text,
+            'analysis': analysis
         })
 
-    # Сохраняем отчёт
-    df = pd.DataFrame(results)
-    out_xlsx = os.path.join(OUTPUT_DIR, 'report.xlsx')
-    df.to_excel(out_xlsx, index=False)
-    print(f"\n=======Готово! Отчёт сохранён в {out_xlsx}=======")
+    # Общий анализ портфолио
+    summary = analyze_portfolio(detailed_docs)
+
+    # Составляем детальную таблицу
+    df_details = pd.DataFrame([
+        {
+            'Файл': doc['filename'],
+            'Заявлено': doc['claimed'],
+            'Определено': doc['detected'],
+            'Описание': doc['description'],
+            'Сходство': f"{doc['similarity']:.2f}",
+            'Совпадает': "Да" if doc['match'] else "Нет",
+            'Анализ LLM (comment)': (
+                doc['analysis'].get('comment')
+                if isinstance(doc['analysis'], dict) and 'comment' in doc['analysis']
+                else (
+                    doc['analysis'].get('raw')
+                    if isinstance(doc['analysis'], dict) and 'raw' in doc['analysis']
+                    else ''
+                )
+            )
+        }
+        for doc in detailed_docs
+    ])
+
+    # Сохраняем сводный JSON
+    summary_path = os.path.join(OUTPUT_DIR, 'portfolio_summary.json')
+    try:
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        print(f"Сводный анализ сохранён в: {summary_path}")
+    except Exception as e:
+        print(f"Ошибка при сохранении сводного анализа в JSON: {e}")
+
+    # Сохраняем отчёт в Excel
+    excel_path = os.path.join(OUTPUT_DIR, 'portfolio_report.xlsx')
+    try:
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            # Лист с деталями по файлам
+            df_details.to_excel(writer, sheet_name='Details', index=False)
+
+            # Лист с оценками по разделам
+            df_scores = pd.DataFrame([
+                {'Раздел': sec, 'Баллы': info['score'], 'Макс': info['max']}
+                for sec, info in summary.get('scores', {}).items()
+            ])
+            df_scores.to_excel(writer, sheet_name='Scores', index=False)
+
+            # Лист с комментариями
+            comments_df = pd.DataFrame({'Комментарии': summary.get('comments', [])})
+            comments_df.to_excel(writer, sheet_name='Comments', index=False)
+
+            # Лист с общей оценкой
+            overall_df = pd.DataFrame([{
+                'TotalScore': summary.get('total_score'),
+                'MaxScore': summary.get('max_score'),
+                'Percent': summary.get('percent'),
+                'Overall': summary.get('overall_assessment')
+            }])
+            overall_df.to_excel(writer, sheet_name='Summary', index=False)
+
+        print(f"Полный отчёт сохранён в Excel: {excel_path}")
+    except Exception as e:
+        print(f"Ошибка при сохранении Excel: {e}")
+        csv_path = os.path.join(OUTPUT_DIR, 'details.csv')
+        try:
+            df_details.to_csv(csv_path, index=False, encoding='utf-8-sig')
+            print(f"Детали сохранены в CSV: {csv_path}")
+        except Exception as e2:
+            print(f"Ошибка при сохранении CSV: {e2}")
 
 if __name__ == '__main__':
     main()
