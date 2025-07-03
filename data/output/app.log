@@ -1,0 +1,16 @@
+2025-07-03 14:09:56,334 [INFO] Processing document: 1.pdf
+2025-07-03 14:09:56,334 [INFO] Claimed category: Документ, удостоверяющий получение степени бакалавра в области Информатики и Вычислительная Техника
+2025-07-03 14:09:56,334 [INFO] Extracting text from file: 1.pdf
+2025-07-03 14:09:56,334 [INFO] OCR fallback for 1.pdf
+2025-07-03 14:10:03,066 [INFO] OCR done (1148 chars)
+2025-07-03 14:10:03,070 [INFO] Running LLM classification for: 1.pdf
+2025-07-03 14:22:30,684 [INFO] OCR fallback for 1.pdf
+2025-07-03 14:22:35,325 [INFO] OCR done (1148 chars)
+2025-07-03 14:27:03,337 [INFO] OCR fallback for 1.pdf
+2025-07-03 14:27:08,144 [INFO] OCR done (1148 chars)
+2025-07-03 14:27:57,094 [INFO] OCR fallback for 2.pdf
+2025-07-03 14:28:02,351 [INFO] OCR done (2022 chars)
+2025-07-03 14:31:31,354 [INFO] OCR fallback for 3.pdf
+2025-07-03 14:31:36,374 [INFO] OCR done (2589 chars)
+2025-07-03 14:35:12,220 [INFO] OCR fallback for 4.pdf
+2025-07-03 14:35:15,416 [INFO] OCR done (1283 chars)

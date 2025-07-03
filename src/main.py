@@ -1,135 +1,124 @@
 import os
 import json
 import pandas as pd
+import logging
 
-from ocr_processor import extract_text
-from llm_client import classify_with_llm, analyze_document
-from classifier import compute_similarity, is_match
-from analyze_portfolio import analyze_portfolio
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("data/output/app.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 
-INPUT_DIR = 'data/input'
-OUTPUT_DIR = 'data/output'
+from src.core.config_loader import load_json
+from src.core.models import DocumentResult
+from src.processors.ocr import extract_text
+from src.processors.classifier import compute_similarity, is_match
+from src.processors.llm_client import classify_with_llm
+from src.processors.name_extractor import extract_person_name
+from src.processors.portfolio_analyzer import analyze_portfolio
+
+# Загрузка конфигов
+TESSERACT_CFG = load_json("config/tesseract_config.json")
+LLM_CFG       = load_json("config/llm_config.json")
+CATEGORIES    = load_json("config/categories.json")
+MANIFEST      = load_json("config/user_manifest.json")
+
+LLM_MODEL = LLM_CFG.get("model", "mistral")
+
+INPUT_DIR  = "data/input"
+OUTPUT_DIR = "data/output"
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-with open('config/tesseract_config.json', encoding='utf-8') as f:
-    t_cfg = json.load(f)
-TESSERACT_LANG = t_cfg.get('lang', 'rus+eng')
-
-with open('config/categories.json', encoding='utf-8') as f:
-    CATEGORIES = json.load(f)
-
-with open('config/user_manifest.json', encoding='utf-8') as f:
-    manifest = json.load(f)
-
-LLM_MODEL = 'mistral'  # или другая модель
-
-def main():
-    detailed_docs = []
-
-    for entry in manifest:
-        fname = entry.get('filename')
-        claimed = entry.get('claimed_type', '').strip()
+def main() -> None:
+    """Main entry point for portfolio analysis. Processes documents, extracts information, and generates reports."""
+    if not MANIFEST or not isinstance(MANIFEST, list) or "expected_name" not in MANIFEST[0]:
+        logging.critical("Manifest must start with an object containing 'expected_name'")
+        return
+    expected_name = MANIFEST[0]["expected_name"].strip()
+    documents = MANIFEST[1:]
+    results = []
+    for entry in documents:
+        fname = entry["filename"]
+        claimed = entry.get("claimed_type", "").strip()
         path = os.path.join(INPUT_DIR, fname)
-
         if not os.path.isfile(path):
-            print(f"Ошибка: файл не найден: {path}")
+            logging.error(f"File not found: {path}")
             continue
-
-        print(f"\n=== Обработка файла: {fname} ===")
-        text = extract_text(path, TESSERACT_LANG)
-
-        detected, description = classify_with_llm(text, CATEGORIES, LLM_MODEL, OUTPUT_DIR)
+        logging.info(f"Processing document: {fname}")
+        logging.info(f"Claimed category: {claimed if claimed else 'Not provided'}")
+        # 1. Извлечение текста
+        logging.info(f"Extracting text from file: {fname}")
+        text = extract_text(path, TESSERACT_CFG["lang"])
+        if not text.strip():
+            logging.warning(f"No text extracted from {fname}")
+            continue
+        # 2. Классификация
+        logging.info(f"Running LLM classification for: {fname}")
+        detected, desc, llm_raw = classify_with_llm(text, CATEGORIES, LLM_MODEL, OUTPUT_DIR)
+        logging.debug("[LLM RAW OUTPUT] ------------------------------")
+        logging.debug(llm_raw)
+        logging.debug("[END LLM RAW OUTPUT] --------------------------")
+        logging.info(f"LLM detected category: {detected}")
+        logging.info(f"LLM description: {desc}")
         sim = compute_similarity(detected, claimed)
         match = is_match(detected, claimed)
-
-        match_str = "Да" if match else "Нет"
-        print(f"Заявлено: {claimed}")
-        print(f"Определено: {detected}")
-        print(f"Сходство категорий (TF-IDF): {sim:.2f}")
-        print(f"Совпадает с заявленным: {match_str}")
-
-        analysis = analyze_document(text, detected, LLM_MODEL, OUTPUT_DIR)
-        detailed_docs.append({
-            'filename': fname,
-            'claimed': claimed,
-            'detected': detected,
-            'description': description,
-            'similarity': sim,
-            'match': match,
-            'text': text,
-            'analysis': analysis
+        logging.info(f"Similarity score: {sim:.3f}")
+        logging.info(f"Category match: {'YES' if match else 'NO'}")
+        # 3. Проверка ФИО
+        logging.info(f"Extracting person name from: {fname}")
+        person = extract_person_name(text, expected_name, LLM_MODEL, OUTPUT_DIR)
+        full_name = person.get('full_name', 'Not found')
+        fio_match = person.get('match_with_expected', False)
+        comment = person.get('comment', '')
+        logging.info(f"Extracted name: {full_name}")
+        logging.info(f"Name matches expected: {'YES' if fio_match else 'NO'}")
+        if comment:
+            logging.info(f"Name extraction comment: {comment}")
+        # 4. Глубокий анализ только если ФИО совпало
+        analysis = {}
+        if fio_match:
+            logging.info(f"Running deep analysis for: {fname}")
+            analysis = {"category": detected}
+        else:
+            logging.info(f"Skipping deep analysis for {fname} (FIO mismatch)")
+        results.append({
+            "filename": fname,
+            "claimed": claimed,
+            "detected": detected,
+            "description": desc,
+            "similarity": sim,
+            "match": match,
+            "text": text,
+            "person": person,
+            "fio_match": fio_match,
+            "analysis": analysis
         })
+    logging.info("Running portfolio analysis and generating reports...")
+    filtered_results = [r for r in results if r["fio_match"]]
+    summary = analyze_portfolio(filtered_results)
+    df = pd.DataFrame([{
+        "Файл":   r["filename"],
+        "Заявлено": r["claimed"],
+        "Определено": r["detected"],
+        "Описание": r["description"],
+        "Сходство": f"{r['similarity']:.2f}",
+        "Совпадает": "Да" if r["match"] else "Нет",
+        "ФИО": r["person"].get("full_name", ""),
+        "ФИО совпадает": "Да" if r["fio_match"] else "Нет",
+        "Комментарий ФИО": r["person"].get("comment", ""),
+        "Анализ": json.dumps(r["analysis"], ensure_ascii=False) if r["fio_match"] else ""
+    } for r in results])
+    details_path = os.path.join(OUTPUT_DIR, "details.xlsx")
+    summary_path = os.path.join(OUTPUT_DIR, "summary.json")
+    df.to_excel(details_path, index=False)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    logging.info(f"Reports saved: {details_path}, {summary_path}")
+    logging.info("Portfolio analysis complete. See output directory for details.")
 
-    # Общий анализ портфолио
-    summary = analyze_portfolio(detailed_docs)
-
-    # Составляем детальную таблицу
-    df_details = pd.DataFrame([
-        {
-            'Файл': doc['filename'],
-            'Заявлено': doc['claimed'],
-            'Определено': doc['detected'],
-            'Описание': doc['description'],
-            'Сходство': f"{doc['similarity']:.2f}",
-            'Совпадает': "Да" if doc['match'] else "Нет",
-            'Анализ LLM (comment)': (
-                doc['analysis'].get('comment')
-                if isinstance(doc['analysis'], dict) and 'comment' in doc['analysis']
-                else (
-                    doc['analysis'].get('raw')
-                    if isinstance(doc['analysis'], dict) and 'raw' in doc['analysis']
-                    else ''
-                )
-            )
-        }
-        for doc in detailed_docs
-    ])
-
-    # Сохраняем сводный JSON
-    summary_path = os.path.join(OUTPUT_DIR, 'portfolio_summary.json')
-    try:
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-        print(f"Сводный анализ сохранён в: {summary_path}")
-    except Exception as e:
-        print(f"Ошибка при сохранении сводного анализа в JSON: {e}")
-
-    # Сохраняем отчёт в Excel
-    excel_path = os.path.join(OUTPUT_DIR, 'portfolio_report.xlsx')
-    try:
-        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            # Лист с деталями по файлам
-            df_details.to_excel(writer, sheet_name='Details', index=False)
-
-            # Лист с оценками по разделам
-            df_scores = pd.DataFrame([
-                {'Раздел': sec, 'Баллы': info['score'], 'Макс': info['max']}
-                for sec, info in summary.get('scores', {}).items()
-            ])
-            df_scores.to_excel(writer, sheet_name='Scores', index=False)
-
-            # Лист с комментариями
-            comments_df = pd.DataFrame({'Комментарии': summary.get('comments', [])})
-            comments_df.to_excel(writer, sheet_name='Comments', index=False)
-
-            # Лист с общей оценкой
-            overall_df = pd.DataFrame([{
-                'TotalScore': summary.get('total_score'),
-                'MaxScore': summary.get('max_score'),
-                'Percent': summary.get('percent'),
-                'Overall': summary.get('overall_assessment')
-            }])
-            overall_df.to_excel(writer, sheet_name='Summary', index=False)
-
-        print(f"Полный отчёт сохранён в Excel: {excel_path}")
-    except Exception as e:
-        print(f"Ошибка при сохранении Excel: {e}")
-        csv_path = os.path.join(OUTPUT_DIR, 'details.csv')
-        try:
-            df_details.to_csv(csv_path, index=False, encoding='utf-8-sig')
-            print(f"Детали сохранены в CSV: {csv_path}")
-        except Exception as e2:
-            print(f"Ошибка при сохранении CSV: {e2}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
