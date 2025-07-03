@@ -14,3 +14,10 @@
 2025-07-03 14:31:36,374 [INFO] OCR done (2589 chars)
 2025-07-03 14:35:12,220 [INFO] OCR fallback for 4.pdf
 2025-07-03 14:35:15,416 [INFO] OCR done (1283 chars)
+2025-07-03 15:56:36,304 [ERROR] PyMuPDF error for document.pdf: no such file: 'data/input/document.pdf'
+2025-07-03 15:56:36,305 [INFO] OCR fallback for document.pdf
+2025-07-03 15:56:36,351 [ERROR] PDF→image conversion error: Unable to get page count.
+I/O Error: Couldn't open file 'data/input/document.pdf': No error.
+
+2025-07-03 15:56:45,126 [INFO] OCR fallback for 1.pdf
+2025-07-03 15:56:55,847 [INFO] OCR done (1148 chars)
